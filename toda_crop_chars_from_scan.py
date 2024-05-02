@@ -1,7 +1,11 @@
 #!/usr/bin/env python
 
 # MEMO:
-
+# 1年生の原稿用紙は14文字・9行(縦書き)
+# 2年生の原稿用紙は20文字・10行(横書き)
+# 3年生の原稿用紙は20文字・12行(縦書き)
+# 4年生の原稿用紙は20文字・11行(縦書き)
+# 5, 6年生の原稿用紙は20文字・15行(縦書き)
 
 # 2024-05-02 
 
@@ -42,25 +46,31 @@ def char_from_scan(input_img, save_dir, i):
                                                  '-c tessedit_char_whitelist="0123456789Ss-ー" --user-patterns PATH: /home/abababam1/HandwrittenTextAlign/toda_crop_imgs/userpattern.txt')
     except Exception as e:
         print(f"OCR failed: {e}")
-        return i
-    
-    number = number.replace(' ', '')
-    if len(number) <= 2:
         return None
-    print(f"OCR Result: '{number}'")
-    numberd_img.save(f'/home/abababam1/HandwrittenTextAlign/test/number/{number}.png')
     
+    # OCR結果下処理
+    number = re.sub(r"[\n $']", '', number)
+    # '-'が抜けてしまった時に対応
+    if '-' not in number:
+        number = number[:2] + '-' + number[2:]
+    # 先頭をSに揃える
+    if number[0] != 'S' and len(number) in [4, 5, 6]:
+        number = re.sub('^[0-9]', 'S', number)
+        
+    print(f"OCR Result: '{number}'")
+    #numberd_img.save(f'/home/abababam1/HandwrittenTextAlign/test/number/{number}.png')
     
     # 例) S1-0, grade = 1, paper_number = 0
-    
     grade = number[1]
-    paper_number = number[3:-1] if '-' in number else number[2:-1]
-    if grade not in [1, 2, 3] or paper_number == '':
+    paper_number = number[3:-1]
+    
+    if grade not in ['1', '2', '3'] or len(number) not in [4,5,6] : # OCR failed -> 別途手作業で対応
         return None
-    if grade in [1, 2]:
+    elif grade in ['1', '2']:
         design_number = (int(paper_number) % 24) or 24
     else:
         design_number = (int(paper_number) % 9) or 9
+    
 
     # シート名ごとの原稿配置を取得
     params = load_genko_params(f'sisha-{grade}-genko-params.json'.format(grade))[design_number - 1]
@@ -96,10 +106,8 @@ def char_from_scan(input_img, save_dir, i):
     
     # 個々の文字の画像を保存する
     save_path = os.path.join(save_dir, f'{file_name}_{number}')
+    os.makedirs(save_path, exist_ok=True)
     for im in chars:
-        if not os.path.exists(save_path):
-            os.makedirs(save_path)
-        
         im = detect_line_in_char(im)
         im.save((save_path)+'/'+'{:05d}.png'.format(i), 'PNG')
         i += 1
@@ -366,5 +374,6 @@ path = sys.argv[1]
 grade = int(sys.argv[2])
 save_dir = sys.argv[3]
 
-char_from_scan(path, save_dir, i = 1)
+#char_from_scan(path, save_dir, i = 1)
+
 
