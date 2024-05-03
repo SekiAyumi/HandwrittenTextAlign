@@ -55,7 +55,7 @@ def char_from_scan(input_img, save_dir, i):
         number = number[:2] + '-' + number[2:]
     # 先頭をSに揃える
     if number[0] != 'S' and len(number) in [4, 5, 6]:
-        number = re.sub('^[0-9]', 'S', number)
+        number = re.sub('^[0-9s]', 'S', number)
         
     print(f"OCR Result: '{number}'")
     #numberd_img.save(f'/home/abababam1/HandwrittenTextAlign/test/number/{number}.png')
@@ -64,7 +64,8 @@ def char_from_scan(input_img, save_dir, i):
     grade = number[1]
     paper_number = number[3:-1]
     
-    if grade not in ['1', '2', '3'] or len(number) not in [4,5,6] : # OCR failed -> 別途手作業で対応
+    if grade not in ['1', '2', '3'] or len(number) not in [4,5,6] or not re.match(r'^\d+$', paper_number):
+        # OCR failed -> 別途手作業で対応
         return None
     elif grade in ['1', '2']:
         design_number = (int(paper_number) % 24) or 24
