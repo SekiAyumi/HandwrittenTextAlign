@@ -19,33 +19,25 @@ import sys
 def char_from_scan(input_img, save_dir, i):
     file_name = os.path.splitext(os.path.basename(input_img))[0] # xaaa
     writer = file_name.split('_')[0]
-    #print(writer)
     
     # スキャン結果を読み込み
     scan_img = Image.open(input_img)
     width, height = scan_img.size
-    # scan_img = scan_img.resize((width*6, height*6)) # 拡大
     
     # 剪定範囲を設定(手書き字がある部分だけ取り出す)
     
     # シート名OCR
-    tools = pyocr.get_available_tools()
-    tool = tools[0]
-    
     try:
         numberd_img = scan_img.crop((0, 0, 1000, 350))
-        #number = tool.image_to_string(numberd_img, lang='eng', builder=pyocr.builders.DigitBuilder(tesseract_layout=8))
-        #numberd_img = ImageOps.invert(numberd_img.convert('L'))
         number = pytesseract.image_to_string(numberd_img, lang = 'eng', config= \
                                                  '-c tessedit_char_whitelist="0123456789Ss-ー" --user-patterns PATH: /home/abababam1/HandwrittenTextAlign/toda_crop_imgs/userpattern.txt')
         if number == '':
             numberd_img = scan_img.crop((0, height - 300, width, height))
-            #number = tool.image_to_string(numberd_img, lang='eng', builder=pyocr.builders.DigitBuilder(tesseract_layout=8))
-            #numberd_img = ImageOps.invert(numberd_img.convert('L'))
             number = pytesseract.image_to_string(numberd_img, lang = 'eng', config= \
                                                  '-c tessedit_char_whitelist="0123456789Ss-ー" --user-patterns PATH: /home/abababam1/HandwrittenTextAlign/toda_crop_imgs/userpattern.txt')
     except Exception as e:
         print(f"OCR failed: {e}")
+        # OCR failed -> 別途手作業で対応
         return None
     
     # OCR結果下処理
@@ -61,10 +53,13 @@ def char_from_scan(input_img, save_dir, i):
     #numberd_img.save(f'/home/abababam1/HandwrittenTextAlign/test/number/{number}.png')
     
     # 例) S1-0, grade = 1, paper_number = 0
-    grade = number[1]
-    paper_number = number[3:-1]
+    if len(number) not in [4,5,6] or number[1] == '-':
+        # OCR failed -> 別途手作業で対応
+        return None
+    grade = path.split('/')[4].split('-')[1]# ファイル名から #number[1]
+    paper_number = number[3:None]
     
-    if grade not in ['1', '2', '3'] or len(number) not in [4,5,6] or not re.match(r'^\d+$', paper_number):
+    if grade not in ['1', '2', '3'] or not re.match(r'^[1-9]\d{0,2}$', paper_number):
         # OCR failed -> 別途手作業で対応
         return None
     elif grade in ['1', '2']:
@@ -78,7 +73,8 @@ def char_from_scan(input_img, save_dir, i):
 
     # crop_box作成
     
-    crop_box = make_crop_box(scan_img, params, grade)
+    #crop_box = make_crop_box(scan_img, params, grade)
+    crop_box = find_largest_rectangle(input_img, width)
     cropped_img = scan_img.crop(crop_box) # crop の引数は ((left, upper, right, lower))
     
     x_threshold,y_threshold,rotation_angle = find_rotation_angle(cropped_img)
@@ -144,6 +140,34 @@ def make_crop_box(scan_img, params, grade):
         lower = height - k * (char_size_px + sep_size_px)
 
     return (0, height - upper, width, lower)
+
+def find_largest_rectangle(input_img, width):
+    # 画像を読み込み
+    img = cv2.imread(input_img)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # エッジ検出
+    edged = cv2.Canny(gray, 50, 150)
+
+    # 輪郭を見つける
+    contours, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # 最大面積の四角形を見つける
+    max_area = 0
+    best_rect = None
+    for contour in contours:
+        rect = cv2.minAreaRect(contour)  # 最小の回転された矩形を取得
+        box = cv2.boxPoints(rect)  # 回転された矩形の四角を取得
+        box = np.int0(box)  # 座標を整数に変換
+        area = cv2.contourArea(box)
+        if area > max_area:
+            max_area = area
+            best_rect = box
+    
+    if best_rect is not None:
+        # バウンディングボックスの座標でクロップ
+        x, y, w, h = cv2.boundingRect(best_rect)
+        return (0, y - 40, width, y + h + 40)
 
 # 連続した長さのリストを返す関数
 def find_continuous_lengths(input_list):
@@ -230,7 +254,7 @@ def detect_lines(cropped_img, params):
     char_size_px = int((char_width / 2.54) * dpi)
     sep_size_px = int((sep_width / 2.54) * dpi)
     
-    minlength = char_size_px * 0.8 * 5
+    minlength = char_size_px * 5
     gap = 10
     
     # 検出しやすくするために二値化
@@ -344,8 +368,8 @@ def detect_line_in_char(char_img):
         for line in lines:
             x1, y1, x2, y2 = line[0]
             # 傾きが threshold_slope px以内の線をyoko線と判断
-            if abs(y1 - y2) < 3:
-                whiteline = 3
+            if abs(y1 - y2) < 10:
+                whiteline = 5
                 lineadd_img = cv2.line(img, (line[0][0], line[0][1]), (line[0][2], line[0][3]), (255, 255, 255), whiteline)
     return Image.fromarray(lineadd_img)
     
