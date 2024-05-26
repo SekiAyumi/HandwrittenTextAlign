@@ -56,7 +56,7 @@ def char_from_scan(input_img, save_dir, i):
     if len(number) not in [4,5,6] or number[1] == '-':
         # OCR failed -> 別途手作業で対応
         return None
-    grade = path.split('/')[4].split('-')[1]# ファイル名から #number[1]
+    grade = input_img.split('/')[4].split('-')[1]# ファイル名から #number[1]
     paper_number = number[3:None]
     
     if grade not in ['1', '2', '3'] or not re.match(r'^[1-9]\d{0,2}$', paper_number):
@@ -71,27 +71,24 @@ def char_from_scan(input_img, save_dir, i):
     # シート名ごとの原稿配置を取得
     params = load_genko_params(f'sisha-{grade}-genko-params.json'.format(grade))[design_number - 1]
 
+    #x_threshold,y_threshold,rotation_angle = find_rotation_angle(scan_img) # あまり作用しない
+    #rotated_image = scan_img.rotate(rotation_angle, expand=True,fillcolor='white') # 画像を回転
     # crop_box作成
     
-    #crop_box = make_crop_box(scan_img, params, grade)
-    crop_box = find_largest_rectangle(input_img, width)
-    cropped_img = scan_img.crop(crop_box) # crop の引数は ((left, upper, right, lower))
-    
-    x_threshold,y_threshold,rotation_angle = find_rotation_angle(cropped_img)
-    
-    rotated_image = cropped_img.rotate(rotation_angle, expand=True,fillcolor='white') # 画像を回転
-    
-    scan = np.asarray(rotated_image)
-    x_hist = np.mean(255 - scan, axis=0)
-    y_hist = np.mean(255 - scan, axis=1)
+    #coordinate, crop_box = find_largest_rectangle(scan_img, params)
+    cropbox, angle = find_genko_box(scan_img, params)
+    if cropbox is None:
+        return i
+    #rotated_img = scan_img.rotate(angle, expand=True,fillcolor='white') # 画像を回転
+    cropped_img = scan_img.crop(cropbox) # crop の引数は ((left, upper, right, lower))
+    #cropped_img.save('/home/abababam1/cropped_result.jpg') #test
     
     # 全ての罫線の位置を取得
-    lines = detect_lines(rotated_image, params)
+    lines = detect_lines(cropped_img, params)
     main_lines, sub_line_start = detect_main_line(lines, params)
-    print(main_lines[0:2])
     
-    # 罫線を白塗り（縦のみ、横は無理だった）
-    image = np.array(rotated_image)
+    # 罫線を白塗り（メインラインのみ）
+    image = np.array(cropped_img)
     for line in lines:
         whiteline = 3
         lineadd_img = cv2.line(image, (line[0][0], line[0][1]), (line[0][2], line[0][3]), (255, 255, 255), whiteline)
@@ -99,14 +96,16 @@ def char_from_scan(input_img, save_dir, i):
     #cv2.imwrite('/home/abababam1/out.jpg', lineadd_img) #test
     
     # 文字ごとに切り分け
-    chars = detect_chars_cropbox(rotated_image, main_lines, sub_line_start, params)
+    chars = detect_chars_from_cropbox(scan_img, params, cropbox)
+    #chars = detect_chars_crop_box(cropped_img, main_lines, sub_line_start, params, coordinate)
+    #chars = detect_chars_crop_box(scan_img, main_lines, sub_line_start, params, coordinate)
     
     # 個々の文字の画像を保存する
     save_path = os.path.join(save_dir, f'{file_name}_{number}')
     os.makedirs(save_path, exist_ok=True)
     for im in chars:
-        im = detect_line_in_char(im)
-        im.save((save_path)+'/'+'{:05d}.png'.format(i), 'PNG')
+        im_clean = detect_line_in_char(im)
+        im_clean.save((save_path)+'/'+'{:05d}.png'.format(i), 'PNG')
         i += 1
     return i
 
@@ -133,19 +132,37 @@ def make_crop_box(scan_img, params, grade):
     k = 3 if grade == 3 else 0
 
     if muki == 'tate':
-        upper = (nchars + 2 + k) * char_size_px
+        upper = (nchars + 3 + k) * char_size_px
         lower = height - k * (char_size_px + sep_size_px)
     elif muki == 'yoko':
-        upper = (ncols + 2 + k) * (char_size_px + sep_size_px)
+        upper = (ncols + 3 + k) * (char_size_px + sep_size_px)
         lower = height - k * (char_size_px + sep_size_px)
 
     return (0, height - upper, width, lower)
 
-def find_largest_rectangle(input_img, width):
-    # 画像を読み込み
-    img = cv2.imread(input_img)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+def find_largest_rectangle(pillow_img, params):
+    # 読み込み
+    width, _ = pillow_img.size
+    nchars = params['nchars']
+    ncols = params['ncols']
+    char_width = params['char_width']
+    sep_width = params['sep_width']
+    
+    # ピクセルに変換する
+    dpi = 600
+    char_size_px = int((char_width / 2.54) * dpi)
+    sep_size_px = int((sep_width / 2.54) * dpi)
+    
+    #原稿用紙部分の面積
+    best_area = (ncols * (char_size_px + sep_size_px)) * (nchars * char_size_px)
+    
+    # Pillowの画像をNumPy配列に変換（RGB）
+    img = np.array(pillow_img)
 
+    # RGBをBGRに変換
+    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
     # エッジ検出
     edged = cv2.Canny(gray, 50, 150)
 
@@ -153,21 +170,151 @@ def find_largest_rectangle(input_img, width):
     contours, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     # 最大面積の四角形を見つける
-    max_area = 0
+    min_distance = 2500
     best_rect = None
+    best_angle = 0
     for contour in contours:
         rect = cv2.minAreaRect(contour)  # 最小の回転された矩形を取得
         box = cv2.boxPoints(rect)  # 回転された矩形の四角を取得
-        box = np.int0(box)  # 座標を整数に変換
+        #box = np.int0(box)  # 座標を整数に変換
         area = cv2.contourArea(box)
-        if area > max_area:
-            max_area = area
+        #angle = 90+rect[2]  # 回転角を設定
+        #if area > max_area:
+            #max_area = area
+            #best_rect = box
+            #best_angle = angle
+        distance = abs(area - best_area)
+        if distance < min_distance:
+            min_distance = distance
             best_rect = box
+            
     
     if best_rect is not None:
         # バウンディングボックスの座標でクロップ
         x, y, w, h = cv2.boundingRect(best_rect)
-        return (0, y - 40, width, y + h + 40)
+        return (x+10, y+10, x+w-10, y+h-10), (0, y - 40, width, y + h + 40)
+    
+def calculate_angle_yoko(x1, y1, x2, y2):
+    if x2 - x1 == 0: # 垂直の場合
+        return 0
+    slope = (y2 - y1) / (x2 - x1)
+    
+    # 角度を計算（ラジアン）
+    angle_radians = math.atan(slope)
+    # 角度を度に変換
+    angle_degrees = math.degrees(angle_radians)
+    
+    return angle_degrees
+
+def calculate_angle_tate(x1, y1, x2, y2):
+    if y2 - y1 == 0: # 平行線の場合
+        return 0
+    slope = (y2 - y1) / (x2 - x1)
+    
+    # 角度を計算（ラジアン）
+    angle_radians = math.atan(slope)
+    # 角度を度に変換
+    angle_degrees = math.degrees(angle_radians)
+    
+    return angle_degrees
+    
+def check_genko_size_and_angle(hull, genko_1, genko_2):  
+    quad = set()
+    n = len(hull)
+    x_max, x_min = 0, float('inf')
+    y_max, y_min = 0, float('inf')
+    genko_angle_list = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            ij_width = abs(hull[i][0][0] - hull[j][0][0])
+            ij_height = abs(hull[i][0][1] - hull[j][0][1])
+            # 横
+            if any(abs(ij_width - henn) <= 20 for henn in [genko_1, genko_2]) and ij_height <= 5:
+                quad.add(tuple(hull[i][0]))
+                quad.add(tuple(hull[j][0]))
+                x_max = max(x_max, hull[i][0][0], hull[j][0][0])
+                x_min = min(x_min, hull[i][0][0], hull[j][0][0])
+                genko_angle = calculate_angle_yoko(hull[i][0][0], hull[j][0][0], hull[i][0][0], hull[j][0][0])
+                genko_angle_list.append(genko_angle)
+            # 縦
+            elif ij_width <= 5 and any(abs(ij_height - henn) <= 20 for henn in [genko_1, genko_2]):
+                quad.add(tuple(hull[i][0]))
+                quad.add(tuple(hull[j][0]))
+                y_max = max(y_max, hull[i][0][1], hull[j][0][1])
+                y_min = min(y_min, hull[i][0][1], hull[j][0][1])
+                genko_angle = calculate_angle_tate(hull[i][0][0], hull[j][0][0], hull[i][0][0], hull[j][0][0])
+                genko_angle_list.append(genko_angle)
+    if len(quad) >= 4:
+        # 四頂点と右上の座標
+        #cropbox = (max(0, x_min + 5), max(0, y_min + 5), min(x_max - 5, 5000), min(y_max - 5, 6000))
+        cropbox = (x_min + 5, y_min + 5, x_max - 5, y_max - 5)
+        return quad, cropbox, genko_angle_list
+    else:
+        return quad, None, genko_angle
+
+def find_genko_box(pillow_img, params):
+    width, height = pillow_img.size
+    nchars = params['nchars']
+    ncols = params['ncols']
+    char_width = params['char_width']
+    sep_width = params['sep_width']
+    
+    # ピクセルに変換する
+    dpi = 600
+    char_size_px = int((char_width / 2.54) * dpi)
+    sep_size_px = int((sep_width / 2.54) * dpi)
+    print(char_size_px, sep_size_px)
+    
+    #原稿用紙部分の面積
+    best_area = (ncols * (char_size_px + sep_size_px) + sep_size_px) * (nchars * char_size_px)
+    
+    # Pillowの画像をNumPy配列に変換（RGB）
+    img = np.array(pillow_img)
+
+    # RGBをBGRに変換
+    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
+    # エッジ検出
+    edged = cv2.Canny(gray, 50, 150)
+
+    # 輪郭を見つける
+    contours, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # 最大面積の四角形を見つける
+    min_distance = float('inf')#width * height - best_area
+    best_rect = None
+    for contour in contours:
+        
+        # 凸包近似
+        hull = cv2.convexHull(contour)
+        area = cv2.contourArea(hull)
+        
+        distance = abs(area - best_area)
+        if distance < min_distance:
+            min_distance = distance
+            best_rect = hull
+        
+    if best_rect is not None:
+        cv2.drawContours(img, [best_rect], -1, (0, 255, 0), 2)  # 緑色の線で描画
+        genko_1 = ncols * (char_size_px + sep_size_px) + sep_size_px
+        genko_2 = nchars * char_size_px
+        quad, cropbox, angle = check_genko_size_and_angle(best_rect, genko_1, genko_2)
+        for i in range(len(quad)):
+            cv2.circle(img, list(quad)[i], 10, (0, 0, 255), thickness=5, lineType=cv2.LINE_8, shift=0)
+        for i in range(len(best_rect)):
+            cv2.circle(img, tuple(best_rect[i][0]), 5, (255, 0, 0), thickness=5, lineType=cv2.LINE_8, shift=0)
+        cv2.imwrite('/home/abababam1/result_image_.jpg', img)
+
+        if len(quad) >= 4:
+            return cropbox, angle
+        else:
+            print('quadrilaterals Detection error')
+            return None, angle
+    else:
+        print('hull Detection error')
+        return None, angle
+
 
 # 連続した長さのリストを返す関数
 def find_continuous_lengths(input_list):
@@ -241,6 +388,7 @@ def find_rotation_angle(cropped_img):
     rotation_angle = rotation_angle_list[min_index]
     return x_threshold,y_threshold,rotation_angle
 
+
 def detect_lines(cropped_img, params):
     img = np.array(cropped_img)
     #img = cropped_img[:,:,0]
@@ -254,8 +402,8 @@ def detect_lines(cropped_img, params):
     char_size_px = int((char_width / 2.54) * dpi)
     sep_size_px = int((sep_width / 2.54) * dpi)
     
-    minlength = char_size_px * 5
-    gap = 10
+    minlength = char_size_px * 5#0.8 * 5
+    gap = 20
     
     # 検出しやすくするために二値化
     th, judge_img = cv2.threshold(judge_img, 1, 255, cv2.THRESH_BINARY)
@@ -283,7 +431,7 @@ def detect_main_line(lines, params):
         
         for line in lines:
             x1, y1, x2, y2 = line[0]
-            if previous_x1 is None or abs(previous_x1 - x1) > 10: # ほぼ同じ縦線消去
+            if previous_x1 is None or abs(previous_x1 - x1) > 50: # ほぼ同じ縦線消去
                 col_ranges.append(x1)
                 sub_line_start.append(min(y1, y2)) # 上から(右から)
             previous_x1 = x1
@@ -299,7 +447,7 @@ def detect_main_line(lines, params):
         
         for line in lines:
             x1, y1, x2, y2 = line[0]
-            if previous_y1 is None or abs(previous_y1 - y1) > 10: # ほぼ同じ横線消去
+            if previous_y1 is None or abs(previous_y1 - y1) > 50: # ほぼ同じ横線消去
                 row_ranges.append(y1)
                 sub_line_start.append(min(x1, x2)) # 左から
             previous_y1 = y1
@@ -307,7 +455,7 @@ def detect_main_line(lines, params):
         sub_line_start.sort()
         return row_ranges, sub_line_start[0]
     
-def detect_chars_cropbox(rotated_image, main_lines, sub_line_start, params):
+def detect_chars_crop_box(rotated_image, main_lines, sub_line_start, params, coordinate):
     try:
         print(main_lines[0])
     except ZeroDivisionError as e:
@@ -330,22 +478,63 @@ def detect_chars_cropbox(rotated_image, main_lines, sub_line_start, params):
     if muki == 'tate': # 右から
         for cols in range(int(ncols)):
             for n in range(int(nchars)):
-                x_right = main_lines[1] - cols * (char_size_px + sep_size_px)
-                y_upper = sub_line_start + n * char_size_px
+                #x_right = main_lines[1] - cols * (char_size_px + sep_size_px)
+                x_right = coordinate[2] - sep_size_px - cols * (char_size_px + sep_size_px)
+                #y_upper = sub_line_start + n * char_size_px
+                y_upper = coordinate[1] + n * char_size_px
                 
                 x_left = x_right - char_size_px
                 y_lower = y_upper + char_size_px
-                char = rotated_image.crop((x_left+2, y_upper+2, x_right-2, y_lower-2))
+                char = rotated_image.crop((x_left, y_upper, x_right, y_lower))
                 chars.append(char)
     elif muki == 'yoko': # 左から
         for cols in range(int(ncols)):
             for n in range(int(nchars)):
-                x_left = sub_line_start + n * char_size_px
-                y_upper = main_lines[1] + cols * (char_size_px + sep_size_px)
+                #x_left = sub_line_start + n * char_size_px
+                x_left = coordinate[0] + n * char_size_px
+                #y_upper = main_lines[1] + cols * (char_size_px + sep_size_px)
+                y_upper = coordinate[1] + sep_size_px + cols * (char_size_px + sep_size_px)
                 
                 x_right = x_left + char_size_px
                 y_lower = y_upper + char_size_px
-                char = rotated_image.crop((x_left+5, y_upper+5, x_right-5, y_lower-5))
+                char = rotated_image.crop((x_left, y_upper, x_right, y_lower))
+                chars.append(char)
+    return chars
+
+def detect_chars_from_cropbox(img, params, cropbox):
+    
+    muki = params['muki']
+    nchars = params['nchars']
+    ncols = params['ncols']
+    char_width = params['char_width']
+    sep_width = params['sep_width']
+    
+    # ピクセルに変換する
+    dpi = 600
+    char_size_px = int((char_width / 2.54) * dpi)
+    sep_size_px = int((sep_width / 2.54) * dpi)
+    
+    chars = []
+    
+    if muki == 'tate': # 右から
+        for cols in range(int(ncols)):
+            for n in range(int(nchars)):
+                x_right = cropbox[2] - sep_size_px - cols * (char_size_px + sep_size_px)
+                y_upper = cropbox[1] + n * char_size_px
+                
+                x_left = x_right - char_size_px
+                y_lower = y_upper + char_size_px
+                char = img.crop((x_left+2, y_upper+2, x_right-2, y_lower-2))
+                chars.append(char)
+    elif muki == 'yoko': # 左から
+        for cols in range(int(ncols)):
+            for n in range(int(nchars)):
+                x_left = cropbox[0] + n * char_size_px
+                y_upper = cropbox[1] + sep_size_px + cols * (char_size_px + sep_size_px)
+                
+                x_right = x_left + char_size_px
+                y_lower = y_upper + char_size_px
+                char = img.crop((x_left+2, y_upper+2, x_right-2, y_lower-2))
                 chars.append(char)
     return chars
 
@@ -355,7 +544,7 @@ def detect_line_in_char(char_img):
     judge_img = cv2.bitwise_not(img)
 
     minlength = width * 0.95
-    gap = 10
+    gap = 5
 
     # 検出しやすくするために二値化
     th, judge_img = cv2.threshold(judge_img, 1, 255, cv2.THRESH_BINARY)
@@ -363,15 +552,13 @@ def detect_line_in_char(char_img):
     lines = []
     lines = cv2.HoughLinesP(judge_img, rho=1, theta=np.pi/360, threshold=100, minLineLength=minlength, maxLineGap=gap)
     
-    lineadd_img = np.copy(img)  # 元の画像データを直接変更しないようにコピーを作成
     if lines is not None:
         for line in lines:
             x1, y1, x2, y2 = line[0]
-            # 傾きが threshold_slope px以内の線をyoko線と判断
-            if abs(y1 - y2) < 10:
-                whiteline = 5
-                lineadd_img = cv2.line(img, (line[0][0], line[0][1]), (line[0][2], line[0][3]), (255, 255, 255), whiteline)
-    return Image.fromarray(lineadd_img)
+            if abs(y1 - y2) < 10 or abs(x1 - x2) < 10:
+                whiteline = 3
+                img = cv2.line(img, (line[0][0], line[0][1]), (line[0][2], line[0][3]), (255, 255, 255), whiteline)
+    return Image.fromarray(img)
     
 
 #---
