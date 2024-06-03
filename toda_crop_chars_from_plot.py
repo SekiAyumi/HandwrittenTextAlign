@@ -133,10 +133,11 @@ def char_from_scan(input_img, save_dir, i):
     save_path = os.path.join(save_dir, f'{file_name}_{number}')
     os.makedirs(save_path, exist_ok=True)
     for i, cropped_image in enumerate(cropped_images.values()):
-        #im_clean = detect_line_in_char(im)
+        image = detect_line_in_char(cropped_image)
+        
         #cropped_image.save((save_path)+'/'+'{:05d}.png'.format(i), 'PNG')
         output_path = f'{save_path}'+'/'+'{:05d}.png'.format(i)
-        cv2.imwrite(output_path, cropped_image)
+        cv2.imwrite(output_path, image)
     return i
 
 # 原稿配置のパラメータが入ったjsonファイルの読み込み
@@ -162,8 +163,8 @@ def check_genko_size_and_angle(hull, genko_1, genko_2):
                 x_min = min(x_min, hull[i][0][0], hull[j][0][0])
                 y_max = max(y_max, hull[i][0][1], hull[j][0][1])
                 y_min = min(y_min, hull[i][0][1], hull[j][0][1])
-                genko_angle = calculate_angle_yoko(hull[i][0][0], hull[j][0][0], hull[i][0][0], hull[j][0][0])
-                genko_angle_list.append(genko_angle)
+                #genko_angle = calculate_angle_yoko(hull[i][0][0], hull[j][0][0], hull[i][0][0], hull[j][0][0])
+                #genko_angle_list.append(genko_angle)
             # 縦
             elif ij_width <= 5 and any(abs(ij_height - henn) <= 50 for henn in [genko_1, genko_2]):
                 quad.add(tuple(hull[i][0]))
@@ -172,8 +173,8 @@ def check_genko_size_and_angle(hull, genko_1, genko_2):
                 x_min = min(x_min, hull[i][0][0], hull[j][0][0])
                 y_max = max(y_max, hull[i][0][1], hull[j][0][1])
                 y_min = min(y_min, hull[i][0][1], hull[j][0][1])
-                genko_angle = calculate_angle_tate(hull[i][0][0], hull[j][0][0], hull[i][0][0], hull[j][0][0])
-                genko_angle_list.append(genko_angle)
+                #genko_angle = calculate_angle_tate(hull[i][0][0], hull[j][0][0], hull[i][0][0], hull[j][0][0])
+                #genko_angle_list.append(genko_angle)
     if len(quad) >= 4:
         # 四頂点と右上の座標
         #cropbox = (max(0, x_min + 5), max(0, y_min + 5), min(x_max - 5, 5000), min(y_max - 5, 6000))
@@ -285,26 +286,38 @@ def detect_chars_from_cropbox(img, params, cropbox):
 
 
 def detect_line_in_char(char_img): # cleaner
-    img = np.array(char_img)
-    height, width = img.shape
-    judge_img = cv2.bitwise_not(img)
-
-    minlength = width * 0.95
-    gap = 5
+    image = np.array(char_img)
 
     # 検出しやすくするために二値化
-    th, judge_img = cv2.threshold(judge_img, 1, 255, cv2.THRESH_BINARY)
+    #th, judge_img = cv2.threshold(judge_img, 1, 255, cv2.THRESH_BINARY)
+    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    gray = cv2.cvtColor(image,cv2.COLOR_BGR2GRAY)
+    gray = cv2.bitwise_not(gray)
+    canny_edges = cv2.Canny(gray, 1, 100, apertureSize = 3)
+    kernel = np.ones((3, 3), np.uint8)
+    outLineImage = cv2.dilate(canny_edges, kernel, iterations=1)
+    
+    height, width = gray.shape
+    
+    minlength = width * 0.90
+    gap = 30
 
     lines = []
-    lines = cv2.HoughLinesP(judge_img, rho=1, theta=np.pi/360, threshold=100, minLineLength=minlength, maxLineGap=gap)
+    lines = cv2.HoughLinesP(outLineImage, rho=1, theta=np.pi/360, threshold=100, minLineLength=minlength, maxLineGap=gap)
     
+    detect_length = width * 0.05
     if lines is not None:
         for line in lines:
             x1, y1, x2, y2 = line[0]
-            if abs(y1 - y2) < 10 or abs(x1 - x2) < 10:
-                whiteline = 3
-                img = cv2.line(img, (line[0][0], line[0][1]), (line[0][2], line[0][3]), (255, 255, 255), whiteline)
-    return Image.fromarray(img)
+            if (abs(y1 - y2) < 5 and (y1 < detect_length or y2 > height-detect_length)) or (abs(x1 - x2) < 5 and (x1 < detect_length or x2 > width-detect_length)):
+                whiteline = 2
+                img = cv2.line(image, (line[0][0], line[0][1]), (line[0][2], line[0][3]), (255, 255, 255), whiteline)
+        if img is not None:
+            return img#Image.fromarray(img)
+        else:
+            return char_img
+    else:
+        return char_img
 
 # 確率的ハフ変換で直線を抽出する関数
 def hough_lines_p(image, outLineImage, char_size_px):
@@ -421,7 +434,7 @@ def cluster_and_round_points(points, eps=3, min_samples=1):
     
     return np.array(clustered_points)
 
-def cluster_x_coordinates(points, eps=3, min_samples=1):
+def cluster_x_coordinates(points, eps=2, min_samples=1):
     if len(points) == 0:
         return np.array(points)
     # x座標のみを取り出してクラスタリング
@@ -441,7 +454,7 @@ def cluster_x_coordinates(points, eps=3, min_samples=1):
     
     return clustered_points
 
-def cluster_y_coordinates(points, eps=3, min_samples=1):
+def cluster_y_coordinates(points, eps=2, min_samples=1):
     if len(points) == 0:
         return np.array(points)
     # y座標のみを取り出してクラスタリング
@@ -468,26 +481,26 @@ def is_square(cross_points, i, n, square, char_size_px, cropbox, tolerance):
     for j in range(i+1, n): # 下/左
         p2 = cross_points[j]
         d2 = np.linalg.norm(np.array(p1) - np.array(p2))
-        if not abs(d2 - char_size_px) <= tolerance:
-            continue
-        else:
+        if abs(d2 - char_size_px) <= tolerance:
             square.append(p2)
+        else:
+            continue
         for k in range(j+1, n): # 左/右
             p3 = cross_points[k]
             d3 = np.linalg.norm(np.array(p1) - np.array(p3))
-            if not abs(d3 - char_size_px) <= tolerance:
-                continue
-            else:
+            if abs(d3 - char_size_px) <= tolerance:
                 square.append(p3)
+            else:
+                continue
             for l in range(k+1, n): # 左下/右下
                 p4 = cross_points[l]
                 d4 = np.linalg.norm(np.array(p1) - np.array(p4))
-                if not abs(d4 - np.sqrt(2) * char_size_px) <= tolerance:
-                    continue
-                else:
+                if abs(d4 - np.sqrt(2) * char_size_px) <= tolerance:
                     square.append(p4)
                     if len(square) >= 3:
                         return square
+                else:
+                    continue
 
 def find_squares(cross_points, params, cropbox):
     squares = dict()
@@ -503,7 +516,8 @@ def find_squares(cross_points, params, cropbox):
     char_size_px = int((char_width / 2.54) * dpi)
     sep_size_px = int((sep_width / 2.54) * dpi)
     
-    tolerance = 10
+    # sep_width未満にするべき
+    tolerance = 5
             
     if muki == 'tate':
         # ソート: x は降順、y は昇順
@@ -534,6 +548,10 @@ def find_squares(cross_points, params, cropbox):
     return squares
 
 def crop_squares(image, squares):
+    #char_width = params['char_width']
+    #dpi = 600
+    #char_size_px = int((char_width / 2.54) * dpi)
+    
     cropped_images = dict()
     for i, square in squares.items():
         x_coords = [int(p[0]) for p in square]
@@ -543,5 +561,41 @@ def crop_squares(image, squares):
         
         #if (max_x - min_x) == side_length and (max_y - min_y) == side_length:
         cropped_image = image[min_y:max_y, min_x:max_x]
+
+        #left = sorted(approx, key=lambda x: x[0])[:2]
+        #right = sorted(approx, key=lambda x: x[0])[2:]
+        #left_down = sorted(left, key=lambda x: x[0][1])[0]
+        #left_up = sorted(left, key=lambda x: x[0][1])[1]
+        #right_down = sorted(right, key=lambda x: x[0][1])[0]
+        #right_up = sorted(right, key=lambda x: x[0][1])[1]
+        
+        #left_down = [min_x, max_y]
+        #right_down = [max_x, max_y]
+        #right_up = [max_x, min_y]
+        #left_up = [min_x, min_y]
+
+        #perspective_base = np.float32([left_down, right_down, right_up, left_up])
+        #perspective = np.float32([[0, 0], [char_size_px, 0], [char_size_px, char_size_px], [0, char_size_px]]) # ⚠️
+
+        #psp_matrix = cv2.getPerspectiveTransform(perspective_base, perspective) # 引数はfloat32のnumpy配列である必要
+        #square_image = cv2.warpPerspective(cropped_image, psp_matrix, (square_size, square_size))
+        
         cropped_images[i] = cropped_image
     return cropped_images
+
+def PerspectiveTransform(img, square, square_size):
+    left_down, right_down, right_up, left_up = square
+    # 台形の4点
+    perspective_base = np.float32([left_down, right_down, right_up, left_up])
+
+    # 変換先の座標（正方形の4点）
+    perspective = np.float32([
+        [0, square_size], 
+        [square_size, square_size], 
+        [square_size, 0], 
+        [0, 0]
+    ])
+    psp_matrix = cv2.getPerspectiveTransform(perspective_base, perspective)
+    square_img = cv2.warpPerspective(img, psp_matrix, (square_size, square_size))
+    
+    return square_img
