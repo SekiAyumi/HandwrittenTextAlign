@@ -705,48 +705,42 @@ def PerspectiveTransform(img, square, square_size):
 
 # -----------------------------------------------------------------------------------------
 
-# 交点のデータに位置をつける
-def sorting_mean_crosspoint_and_kdsearch(cross_points, params):
-
+def sort_crosspoints(cross_points, params):
     muki = params['muki']
-    nchars = params['nchars']
-    ncols = params['ncols']
+    
+    if muki == 'tate':
+        numbered_cluster_dic = find_j_cluster_sort_i(cross_points, eps=1, min_samples=1)
+    elif muki == 'yoko':
+        numbered_cluster_dic = find_i_cluster_sort_j(cross_points, eps=1, min_samples=1)
+        
+    return numbered_cluster_dic
+
+def compliment_cross_points(cross_points, params, numbered_cluster_dic):
+    muki = params['muki']
     char_width = params['char_width']
     sep_width = params['sep_width']
     
-    # ピクセルに変換する
     dpi = 600
     char_size_px = int((char_width / 2.54) * dpi)
     sep_size_px = int((sep_width / 2.54) * dpi)
+    
+    min_i, max_i = minmax_i_cluster(cross_points, eps=1, min_samples=1)
+    min_j, max_j = minmax_j_cluster(cross_points, eps=1, min_samples=1)
+    minmax = (min_i, max_i, min_j, max_j)
+    
+    for k in numbered_cluster_dic.keys():
+        # ノイズを除去
+        numbered_cluster_dic[k] = Rid_noise(numbered_cluster_dic[k], muki, char_size_px, sep_size_px)
+        # 欠けてる点を補間
+        numbered_cluster_dic[k] = Interpolate_lack(numbered_cluster_dic[k], muki, char_size_px, sep_size_px, minmax)
+            
+    return numbered_cluster_dic
 
-    x_cluster = find_x_cluster(cross_points, eps=1, min_samples=1)
-    y_cluster = find_y_cluster(cross_points, eps=1, min_samples=1)
-    #mean_adjusted_x_cluster = mean_squared(x_cluster, char_size_px)
-    #mean_adjusted_y_cluster = mean_squared(y_cluster, char_size_px)
-
-    len_x_cluster = len(x_cluster)
-    len_y_cluster = len(y_cluster)
-
-    sorted_mean_crosspoint = []
-    for i in range(len_x_cluster):
-        for j in range(len_y_cluster):
-            sorted_mean_crosspoint.append((x_cluster[i], y_cluster[j]))
-
-    if muki == 'tate':
-        # ソート: x は降順、y は昇順
-        sorted_mean_crosspoint = sorted(cross_points, key=lambda point: (-point[0], point[1]))
-        selected_cross_points = kd_search(cross_points, sorted_mean_crosspoint, len_x_cluster, len_y_cluster, muki)
-    elif muki == 'yoko':
-        # ソート: y を優先して昇順、その次に x を昇順にソート
-        sorted_mean_crosspoint = sorted(cross_points, key=lambda point: (point[1], point[0]))
-        selected_cross_points = kd_search(cross_points, sorted_mean_crosspoint, len_x_cluster, len_y_cluster, muki)
-    return selected_cross_points
-
-def find_y_cluster(points, eps=1, min_samples=1):
+def find_i_cluster_sort_j(points, eps=1, min_samples=1):
     if len(points) == 0:
         return np.array(points)
-    # 座標のリストをnumpy配列に変換
-    # points = np.array(points)
+    
+    # 縦書き: ソート: x は降順、y は昇順
     
     # y座標のみを取り出してクラスタリングを実行
     y_coords = points[:, 1].reshape(-1, 1)
@@ -754,29 +748,60 @@ def find_y_cluster(points, eps=1, min_samples=1):
     labels = clustering.labels_
     unique_labels = set(labels)
     
-    mean_y_values = []
-    # 各クラスタのy座標の平均値を計算
+    # クラスターごとのx座標に基づいて昇順に番号を付ける
+    numbered_cluster_dic = dict()
     for label in unique_labels:
-        if label == -1:
+        cluster_points = points[labels == label]
+        # ノイズ除去 ⚠️　不完全だが、罫線以外の交点を取るため
+        if len(cluster_points) == 1:
             continue
-        # クラスター内のy座標をまとめ、その平均値を新しいy座標とする # ⚠️ 同じxの値に対して
-        cluster_indices = np.where(labels == label)[0]
-        mean_y = np.round(np.mean(points[cluster_indices, 1])).astype(int)
-        mean_y_values.append(mean_y)
+        
+        # x座標でソート
+        sorted_cluster_points = cluster_points[np.argsort(cluster_points[:, 0])]
+        numbered_cluster_dic[label] = sorted_cluster_points
+        
+    numbered_cluster_list = sorted(numbered_cluster_dic.items(), key=lambda item: np.mean(item[1][:, 1]))
+    numbered_cluster_dic.clear()
+    numbered_cluster_dic.update(numbered_cluster_list)
     
-    # y座標の平均値が最小のクラスタを選ぶ
-    # min_y_cluster_index = np.argmin(mean_y_values)
-    # min_y_cluster = clusters[min_y_cluster_index]
-    
-    return mean_y_values
+    return numbered_cluster_dic
 
-def find_x_cluster(points, eps=1, min_samples=1):
+def find_j_cluster_sort_i(points, eps=1, min_samples=1):
     if len(points) == 0:
         return np.array(points)
-    # 座標のリストをnumpy配列に変換
-    # points = np.array(points)
+    
+    # 横書き: ソート: y は昇順、x は昇順
     
     # x座標のみを取り出してクラスタリングを実行
+    x_coords = points[:, 0].reshape(-1, 1)
+    clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(x_coords)
+    labels = clustering.labels_
+    unique_labels = set(labels)
+    
+    # クラスターごとのy座標に基づいて昇順に番号を付ける
+    numbered_cluster_dic = dict()
+    for label in unique_labels:
+        cluster_points = points[labels == label]
+        # ノイズ除去 ⚠️　罫線以外の交点を取るため
+        if len(cluster_points) == 1:
+            continue
+        
+        # y座標でソート
+        sorted_cluster_points = cluster_points[np.argsort(cluster_points[:, 1])]
+        numbered_cluster_dic[label] = sorted_cluster_points
+        
+    numbered_cluster_list = sorted(numbered_cluster_dic.items(), key=lambda item: np.mean(item[1][:, 0]), reverse=True)
+    numbered_cluster_dic.clear()
+    numbered_cluster_dic.update(numbered_cluster_list)
+    
+    return numbered_cluster_dic
+    
+
+def minmax_j_cluster(points, eps=1, min_samples=1): # x: 横書きの時
+    if len(points) == 0:
+        return np.array(points)
+    
+    # x座標(j)のみを取り出してクラスタリングを実行
     x_coords = points[:, 0].reshape(-1, 1)
     clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(x_coords)
     labels = clustering.labels_
@@ -787,46 +812,85 @@ def find_x_cluster(points, eps=1, min_samples=1):
     for label in unique_labels:
         if label == -1:
             continue
-        # クラスター内のx座標をまとめ、その平均値を新しいx座標とする
         cluster_indices = np.where(labels == label)[0]
         mean_x = np.round(np.mean(points[cluster_indices, 0])).astype(int)
         mean_x_values.append(mean_x)
     
-    # x座標の平均値が最小のクラスタを選ぶ
-    #min_x_cluster_index = np.argmin(mean_x_values)
-    #min_x_cluster = clusters[min_x_cluster_index]
-    
-    return mean_x_values
+    min_mean_x_values = min(mean_x_values)
+    max_mean_x_values = max(mean_x_values)
 
-def mean_squared(point_cluster, char_size_px):
+    return min_mean_x_values, max_mean_x_values
+
+def minmax_i_cluster(points, eps=1, min_samples=1): # y: 縦書きの時
+    if len(points) == 0:
+        return np.array(points)
+    
+    # y座標(i)のみを取り出してクラスタリングを実行
+    y_coords = points[:, 1].reshape(-1, 1)
+    clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(y_coords)
+    labels = clustering.labels_
+    unique_labels = set(labels)
+    
+    mean_y_values = []
+    # 各クラスタのy座標の平均値を計算
+    for label in unique_labels:
+        if label == -1:
+            continue
+        cluster_indices = np.where(labels == label)[0]
+        mean_y = np.round(np.mean(points[cluster_indices, 1])).astype(int)
+        mean_y_values.append(mean_y)
+    
+    min_mean_y_values = min(mean_y_values)
+    max_mean_y_values = max(mean_y_values)
+
+    return min_mean_y_values, max_mean_y_values
+
+# クラスター内points
+def Rid_noise(points, muki, char_size_px, sep_size_px):
     distances = []
-    point_cluster = sorted(point_cluster, key=lambda point: point)
-    i_previous = point_cluster[0]
-    for i in range(1, len(point_cluster)):
-        distance = np.linalg.norm(point_cluster[i] - i_previous) - char_size_px
-        distances.append(distance)
-        i_previous = point_cluster[i]
+    clusters = set()
+    combinations = list(itertools.combinations(points, 2))
+    for combo in combinations:
+        distance = np.linalg.norm(combo[0] - combo[1])
+        eps = abs(distance - char_size_px)
+        if eps < sep_size_px * 0.1:
+            clusters.add(tuple(combo[0]))
+            clusters.add(tuple(combo[1]))
+    if muki == 'tate':
+        return sorted(list(clusters), key=lambda point: point[1])
+    else:
+        return sorted(list(clusters), key=lambda point: point[0])
+
+def Interpolate_lack(points, muki, char_size_px, sep_size_px, minmax):
+    # 等間隔に点を用意（理想）
+    min_i, max_i, min_j, max_j = minmax
+    if muki == 'tate':
+        gold_points = np.arange(min_i, max_i, char_size_px)
+    else:
+        gold_points = np.arange(min_j, max_j, char_size_px)
     
-    mean_distance = np.mean(distances)
-    adjusted_cluster = [x + mean_distance for x in point_cluster]
-    return adjusted_cluster
-
-# 近傍点を探す
-def kd_search(cross_points, sorted_mean_crosspoint, len_x_cluster, len_y_cluster, muki):
-    selected_cross_points = [[None for _ in range(len_y_cluster)] for _ in range(len_x_cluster)]
-
-    for point in cross_points:
-        knn_model = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(sorted_mean_crosspoint) 
-        distances, indices = knn_model.kneighbors([point])
+    # 欠けている点を見つける
+    i = 0
+    for gold_point in gold_points:
         
-        if muki == 'tate':
-            i = indices[0][0] // len_y_cluster
-            j = ((indices[0][0] % len_y_cluster) or len_y_cluster)- 1
-        else:
-            i = ((indices[0][0] % len_x_cluster) or len_x_cluster)- 1
-            j = indices[0][0] // len_x_cluster
-        selected_cross_points[i][j] = sorted_mean_crosspoint[indices[0][0]]
-    return selected_cross_points
+        gold_point = (points[i][0], gold_point) if muki == 'tate' else (gold_point, points[i][1])
+        
+        #close_points = [point for point in points if np.linalg.norm(np.array(point) - np.array(gold_point)) <= sep_size_px*0.2]
+        is_exist = np.array([np.linalg.norm(np.array(point) - np.array(gold_point)) <= sep_size_px*0.7 for point in points])
+        
+        if ~is_exist.any():
+            if muki == 'tate':
+                points.append(gold_point) # y座標を補完
+            else:
+                points.append(gold_point) # x座標を補完
+        i += 1
+        if len(points)-1 < i:
+            i = len(points)-1
+
+    if muki == 'tate':
+        return sorted(list(points), key=lambda point: point[1])
+    else:
+        return sorted(list(points), key=lambda point: point[0])
 # -----------------------------------------------------------------------------------------
 
 # cropboxの4点を収集
