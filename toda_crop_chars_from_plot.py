@@ -667,23 +667,21 @@ def find_squares(cross_points, params, cropbox):
     return squares
 
 def crop_squares(image, squares):
-    #char_width = params['char_width']
-    #dpi = 600
-    #char_size_px = int((char_width / 2.54) * dpi)
-    
     cropped_images = dict()
+    image_np = np.array(image)
     for i, square in squares.items():
+        if square is None:
+            continue
         x_coords = [int(p[0]) for p in square]
         y_coords = [int(p[1]) for p in square]
         min_x, max_x = min(x_coords), max(x_coords)
         min_y, max_y = min(y_coords), max(y_coords)
         
-        #if (max_x - min_x) == side_length and (max_y - min_y) == side_length:
-        cropped_image = image[min_y:max_y, min_x:max_x]
-        
+        cropped_image = image_np[min_y:max_y, min_x:max_x]
+        #cropped_image = Image.fromarray(cropped_image)
+
         cropped_images[i] = cropped_image
     return cropped_images
-
 # ⚠️
 def PerspectiveTransform(img, square, square_size):
     left_down, right_down, right_up, left_up = square
@@ -707,11 +705,15 @@ def PerspectiveTransform(img, square, square_size):
 
 def sort_crosspoints(cross_points, params):
     muki = params['muki']
+    sep_width = params['sep_width']
+    
+    dpi = 600
+    sep_size_px = int((sep_width / 2.54) * dpi)
     
     if muki == 'tate':
-        numbered_cluster_dic = find_j_cluster_sort_i(cross_points, eps=1, min_samples=1)
+        numbered_cluster_dic = find_j_cluster_sort_i(cross_points, eps=sep_size_px*0.7, min_samples=1)
     elif muki == 'yoko':
-        numbered_cluster_dic = find_i_cluster_sort_j(cross_points, eps=1, min_samples=1)
+        numbered_cluster_dic = find_i_cluster_sort_j(cross_points, eps=sep_size_px*0.7, min_samples=1)
         
     return numbered_cluster_dic
 
@@ -734,9 +736,9 @@ def compliment_cross_points(cross_points, params, numbered_cluster_dic):
         # 欠けてる点を補間
         numbered_cluster_dic[k] = Interpolate_lack(numbered_cluster_dic[k], muki, char_size_px, sep_size_px, minmax)
             
-    return numbered_cluster_dic
+    return numbered_cluster_dic, minmax
 
-def find_i_cluster_sort_j(points, eps=1, min_samples=1):
+def find_i_cluster_sort_j(points, eps, min_samples=1):
     if len(points) == 0:
         return np.array(points)
     
@@ -753,7 +755,7 @@ def find_i_cluster_sort_j(points, eps=1, min_samples=1):
     for label in unique_labels:
         cluster_points = points[labels == label]
         # ノイズ除去 ⚠️　不完全だが、罫線以外の交点を取るため
-        if len(cluster_points) == 1:
+        if len(cluster_points) <= 5:
             continue
         
         # x座標でソート
@@ -766,7 +768,7 @@ def find_i_cluster_sort_j(points, eps=1, min_samples=1):
     
     return numbered_cluster_dic
 
-def find_j_cluster_sort_i(points, eps=1, min_samples=1):
+def find_j_cluster_sort_i(points, eps, min_samples=1):
     if len(points) == 0:
         return np.array(points)
     
@@ -783,7 +785,7 @@ def find_j_cluster_sort_i(points, eps=1, min_samples=1):
     for label in unique_labels:
         cluster_points = points[labels == label]
         # ノイズ除去 ⚠️　罫線以外の交点を取るため
-        if len(cluster_points) == 1:
+        if len(cluster_points) <= 5:
             continue
         
         # y座標でソート
@@ -875,14 +877,12 @@ def Interpolate_lack(points, muki, char_size_px, sep_size_px, minmax):
         
         gold_point = (points[i][0], gold_point) if muki == 'tate' else (gold_point, points[i][1])
         
-        #close_points = [point for point in points if np.linalg.norm(np.array(point) - np.array(gold_point)) <= sep_size_px*0.2]
-        is_exist = np.array([np.linalg.norm(np.array(point) - np.array(gold_point)) <= sep_size_px*0.7 for point in points])
+        is_exist = np.array([np.linalg.norm(np.array(point) - np.array(gold_point)) <= sep_size_px*0.5 for point in points])
         
         if ~is_exist.any():
-            if muki == 'tate':
-                points.append(gold_point) # y座標を補完
-            else:
-                points.append(gold_point) # x座標を補完
+            points.append(gold_point) # 座標を補完
+            #points = np.append(points, gold_point)
+            
         i += 1
         if len(points)-1 < i:
             i = len(points)-1
@@ -894,33 +894,134 @@ def Interpolate_lack(points, muki, char_size_px, sep_size_px, minmax):
 # -----------------------------------------------------------------------------------------
 
 # cropboxの4点を収集
-def take_cropbox_from_crosspoints(selected_crosspoints, params):
-    muki = params['muki']
-    
+def cropboxes_from_cross_points(numbered_cluster_dic, params, minmax):
+    keys = list(numbered_cluster_dic.keys())
     cropboxes = dict()
-    masu_number = 0
-    selected_crosspoints = np.array(selected_crosspoints)
-    if muki == 'tate':
-        for i in range(selected_crosspoints.shape[0]-1, 0, -1):
-            for j in range(selected_crosspoints.shape[1]-1):
-                p1 = selected_crosspoints[i][j]
-                p2 = selected_crosspoints[i][j+1]
-                p3 = selected_crosspoints[i-1][j]
-                p4 = selected_crosspoints[i-1][j+1]
-                if all(p is not None for p in (p1, p2, p3, p4)):
-                    cropbox = (p1, p2, p3, p4)
-                    cropboxes[masu_number] = cropbox
-                masu_number += 1
-    else:
-        for j in range(selected_crosspoints.shape[1]-1):
-            for i in range(selected_crosspoints.shape[0]-1):
-                p1 = selected_crosspoints[i][j]
-                p2 = selected_crosspoints[i+1][j]
-                p3 = selected_crosspoints[i][j+1]
-                p4 = selected_crosspoints[i+1][j+1]
-                if all(p is not None for p in (p1, p2, p3, p4)):
-                    cropbox = (p1, p2, p3, p4)
-                    cropboxes[masu_number] = cropbox
-                masu_number += 1
+    number = 1
+    
+    centerlines = centerline(params, minmax)
+    
+    for k in range(len(keys)-1):
+        if not numbered_cluster_dic[keys[k]]:
+            return False
+        for l in range(len(numbered_cluster_dic[keys[k]])-1):
+            
+            cropbox = search_4points(numbered_cluster_dic, keys, params, k, l)
+            
+            if cropbox and is_overlap(cropbox, centerlines, params):
+                cropboxes[number] = cropbox
+                number += 1
+            else:
+                continue
     return cropboxes
+
+def search_4points(numbered_cluster_dic, keys, params, k, l):
+    muki = params['muki']
+    char_width = params['char_width']
+    sep_width = params['sep_width']
+    
+    dpi = 600
+    char_size_px = int((char_width / 2.54) * dpi)
+    sep_size_px = int((sep_width / 2.54) * dpi)
+    
+    p1 = numbered_cluster_dic[keys[k]][l]
+    #print(f'p1: {p1}')
+    
+    i = 0
+    p2 = None
+    while i < 3 and k+i < len(keys):
+        indice2, cood2 = is_distance(p1, numbered_cluster_dic[keys[k+i]][l+1:], char_size_px, sep_size_px)
+        indice2 += l+1
+        if indice2:
+            #print(f'indice2, cood2: {indice2}, {cood2}')
+            p2 = cood2
+            break
+        i += 1
+    else:
+        if p2 == None:
+            return False
+    
+    i = 1
+    p3 = None
+    while i < 5 and k+i < len(keys):
+        indice3, cood3 = is_distance(p1, numbered_cluster_dic[keys[k+i]][:], char_size_px, sep_size_px)
+        if indice3 + 1:
+            #print(f'indice3, cood3: {indice3}, {cood3}')
+            _, _ = is_distance(p2, [cood3], char_size_px*np.sqrt(2), sep_size_px)
+            if _:
+                p3 = cood3
+                break
+        i += 1
+    else:
+        if p3 == None:
+            return False
+    
+    j = 0
+    p4 = None
+    while j < 3 and indice3+1 < len(numbered_cluster_dic[keys[k+i+j]]):
+        indice4, cood4 = is_distance(p2, numbered_cluster_dic[keys[k+i+j]][indice3+1:], char_size_px, sep_size_px)
+        indice4 += indice3+1
+        if indice4:
+            #print(f'indice4, cood4: {indice4}, {cood4}')
+            _, _ = is_distance(p3, [cood4], char_size_px, sep_size_px)
+            if _:
+                p4 = cood4
+                return [p1, p2, p3, p4]
+        j += 1
+    else:
+        if p4 == None:
+            return False
+        
+#------------------------------------------------------------------------------------------------
+
+def is_distance(p1, p2s, char_size_px, sep_size_px):
+    points = [(p, p2s[p], delta(p1, p2s[p], char_size_px)) for p in range(len(p2s)) \
+              if delta(p1, p2s[p], char_size_px) <= sep_size_px*0.5]
+    if len(points) > 0:
+        points = sorted(points, key=lambda point: point[2])
+        return points[0][0], points[0][1]
+    else:
+        return False, False
+    
+def delta(p1, p2, char_size_px):
+    return abs(np.linalg.norm(np.array(p1)-np.array(p2)) - char_size_px)
+
+#------------------------------------------------------------------------------------------------
+
+def centerline(params, minmax):
+    muki = params['muki']
+    nchars = params['nchars']
+    ncols = params['ncols']
+    char_width = params['char_width']
+    sep_width = params['sep_width']
+    
+    # ピクセルに変換する
+    dpi = 600
+    char_size_px = int((char_width / 2.54) * dpi)
+    sep_size_px = int((sep_width / 2.54) * dpi)
+    
+    min_i, max_i, min_j, max_j = minmax
+    if muki == 'tate':
+        top = max_j
+        bottom = min_j
+        centerline = np.arange(max_j - sep_size_px - 0.5*char_size_px, min_j, - (char_size_px + sep_size_px))
+    else:
+        top = min_i
+        bottom = max_i
+        centerline = np.arange(min_i + sep_size_px + 0.5*char_size_px, max_i, char_size_px + sep_size_px)
+    return centerline 
+
+def is_overlap(cropbox, centerlines, params):
+    p1, p2, p3, p4 = cropbox
+    muki = params['muki']
+    z = 0 if muki == 'tate' else 1
+    boxcenterline = ((p1[z]+p2[z])/2 + (p3[z]+p4[z])/2)/2
+    
+    sep_width = params['sep_width']
+    dpi = 600
+    sep_size_px = int((sep_width / 2.54) * dpi)
+    eps = sep_size_px*0.7
+    
+    is_center = np.array([abs(boxcenterline - center) < eps for center in centerlines])
+    return is_center.any()
 
