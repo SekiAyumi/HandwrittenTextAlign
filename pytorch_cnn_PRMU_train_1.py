@@ -106,18 +106,21 @@ def create_common_classes(json_paths):
 
 class CustomImageFolder(Dataset):
     '''Load from multiple jsonfile'''
-    def __init__(self, json_paths, classes, transform=None):
+    def __init__(self, json_paths, classes, transform=None, repeat=1):
         self.image_paths = []
         self.labels = []
+        self.repeat = repeat  # 画像を繰り返し読み込む回数を設定
 
         #遍历所有json并合并数据
         for json_path in json_paths:
             with open(json_path, 'r') as json_file:
                 data = json.load(json_file)
-                self.image_paths.extend(list(data.keys()))
-                self.labels.extend(list(data.values()))
+                # 各画像パスを指定された回数だけ追加して拡張
+                for _ in range(self.repeat):
+                    self.image_paths.extend(list(data.keys()))
+                    self.labels.extend(list(data.values()))
 
-        self.classes = sorted(set(self.labels))
+        self.classes = classes #sorted(set(self.labels))
 
         self.transform = transform
 
@@ -184,7 +187,26 @@ testset = CustomImageFolder(json_paths=test_json_paths, classes=classes, transfo
 testloader = DataLoader(testset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
 
 train_json_paths = [path.replace('.json', '_train.json') for path in json_paths]
-trainset = CustomImageFolder(json_paths=train_json_paths, classes=classes, transform=transform_train)
+# ----------------------------------------------------------------------------------
+repeat_target_files = [path for path in json_paths if 'toda' in path or 'itabashi' in path]
+datasets = []
+
+for json_path in train_json_paths:
+    # データ拡張を行いたいファイルの場合は repeat=5
+    if any(target in json_path for target in repeat_target_files):
+        repeat_value = 5
+    else:
+        repeat_value = 1  # 通常のデータは repeat=1
+        
+    # CustomImageFolder のインスタンスを作成
+    dataset = CustomImageFolder(json_paths=[json_path], classes=classes, transform=transform_train, repeat=repeat_value)
+    datasets.append(dataset)
+
+# すべてのデータセットを結合
+from torch.utils.data import ConcatDataset
+trainset = ConcatDataset(datasets)
+# ---------------------------------------------------------------------------------
+#trainset = CustomImageFolder(json_paths=train_json_paths, classes=classes, transform=transform_train)
 trainloader = DataLoader(trainset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True) 
 #drop_lastをTrueに指定することで、データセットサイズがバッチサイズで割り切れない場合に最後のバッチが削除されます。
 
