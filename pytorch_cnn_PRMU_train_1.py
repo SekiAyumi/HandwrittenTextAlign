@@ -13,23 +13,34 @@ from tqdm import tqdm
 import json
 import random
 import os
-
-
-#--------------------------------
-#このあいだもらった↑のプログラムですが，Validation データと訓練データが重なっています．
-#たしか，これまで訓練中のロスの推移が訓練/valid でほぼ一致していたと思いますが，そのためではないかと思います．
-#分類精度が valid で最大になるところのパラメータを保存していますが，ややオーバーフィット気味のパラメータになっていると思われます．大きな差はないかもしれませんが，次に OCR の訓練をするときに直したらよいと思います．
-#---------------------------------
+import re
 
 model_name = 'PRMU_80'
+model_name = 'PRMU_20_aug_total'
 
 device = torch.device("cuda:1") 
 
-json_paths = ['/data2/abababam1/HandwrittenTextAlign/PRMU/itabashi_80_char_bi_train.json',
+json_paths = ['/data2/abababam1/HandwrittenTextAlign/PRMU/itabashi_80_char_new_bi_train.json',
               '/data2/abababam1/HandwrittenTextAlign/PRMU/toda_80_char_new_bi_train.json',
               '/data2/abababam1/HandwrittenTextAlign/PRMU/etl_200_bi_tt_train.json'
              ]
+json_paths = ['/data2/abababam1/HandwrittenTextAlign/PRMU/itabashi_20_char_new_bi_train.json',
+              '/data2/abababam1/HandwrittenTextAlign/PRMU/toda_20_char_new_bi_train.json',
+              '/data2/abababam1/HandwrittenTextAlign/PRMU/etl_200_bi_tt_train.json'
+             ]
 
+def number_of_data(json_paths):
+    total_length = 0
+    for json_path in json_paths:
+        with open(json_path, 'r') as json_file:
+            data = json.load(json_file)
+            value_length = len(data.values())
+            total_length += value_length
+    return total_length 
+# itabashi, toda
+kodomo_json_paths = [path for path in json_paths if re.search(r'toda_\d{2}', path) or\
+                                                    re.search(r'itabashi_\d{2}', path)]
+augmentation = {'total':45977, 'data_count':number_of_data(kodomo_json_paths)}
 
 NUM_CLASSES = 3130
 
@@ -106,21 +117,18 @@ def create_common_classes(json_paths):
 
 class CustomImageFolder(Dataset):
     '''Load from multiple jsonfile'''
-    def __init__(self, json_paths, classes, transform=None, repeat=1):
+    def __init__(self, json_paths, classes, transform=None):
         self.image_paths = []
         self.labels = []
-        self.repeat = repeat  # 画像を繰り返し読み込む回数を設定
 
         #遍历所有json并合并数据
         for json_path in json_paths:
             with open(json_path, 'r') as json_file:
                 data = json.load(json_file)
-                # 各画像パスを指定された回数だけ追加して拡張
-                for _ in range(self.repeat):
-                    self.image_paths.extend(list(data.keys()))
-                    self.labels.extend(list(data.values()))
+                self.image_paths.extend(list(data.keys()))
+                self.labels.extend(list(data.values()))
 
-        self.classes = classes #sorted(set(self.labels))
+        self.classes = sorted(set(self.labels))
 
         self.transform = transform
 
@@ -139,11 +147,65 @@ class CustomImageFolder(Dataset):
             image = self.transform(image)
 
         return image, label_index
-'''
-trainset = CustomImageFolder(json_paths=json_paths, transform=transform_train)
-trainloader = DataLoader(trainset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True) 
-#drop_lastをTrueに指定することで、データセットサイズがバッチサイズで割り切れない場合に最後のバッチが削除されます。
-'''
+    
+class CustomImageFolder_new(Dataset):
+    '''Load from multiple jsonfile'''
+    def __init__(self, json_paths, classes, transform=None, augmentation=None):
+        self.image_paths = []
+        self.labels = []
+        self.classes = classes #sorted(set(self.labels))
+        self.transform = transform
+    
+        #遍历所有json并合并数据
+        for json_path in json_paths:
+            with open(json_path, 'r') as json_file:
+                data = json.load(json_file)
+                self.image_paths.extend(list(data.keys()))
+                self.labels.extend(list(data.values()))
+                
+        if augmentation:
+            chosen_data = data_augmentations(kodomo_json_paths, **augmentation)
+            keys, values = zip(*chosen_data)
+            # データ拡張によるラベルとパスの対応を追加
+            for key, value in zip(keys, values):
+                if value not in self.classes:
+                    print(f"Adding new label '{value}' to the classes list.")
+                    self.classes.append(value)  # クラスリストにラベルを追加
+                self.image_paths.append(key)
+                self.labels.append(value)
+
+        # クラスリストとラベルの不整合を確認
+        missing_labels = set(self.labels) - set(self.classes)
+        if missing_labels:
+            print(f"Warning: The following labels are missing from classes list after augmentation: {missing_labels}")
+
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, index):
+        image_path = self.image_paths[index]
+        label = self.labels[index]
+
+        label_index = self.classes.index(label)
+
+        image = Image.open(image_path).convert('RGB')
+
+        if self.transform:
+            image = self.transform(image)
+
+        return image, label_index
+    
+def data_augmentations(kodomo_train_json_paths, **augmentation):
+    augment_data_list = []
+    for json_path in kodomo_train_json_paths:
+        with open(json_path, 'r') as json_file:
+            data = json.load(json_file)
+            augment_data_list.extend(zip(list(data.keys()), list(data.values())))
+    number_of_samples = augmentation['total']-augmentation['data_count']
+    chosen_data_list = random.choices(augment_data_list, k=number_of_samples)
+    return chosen_data_list
+
 def create_test_json(json_path, test_json_path, train_json_path, test_ratio=0.2): # 検証データセットの作成
     '''each trainset extracts 20% of the data of each class to make a test set'''
     if os.path.exists(test_json_path): #不重复制作testset
@@ -174,56 +236,22 @@ def create_test_json(json_path, test_json_path, train_json_path, test_ratio=0.2)
     # trainデータを元のファイルに上書き
     with open(train_json_path, 'w') as file:
         json.dump(train_samples, file, indent=4)
-
+    
 for json_path in json_paths:
     test_json_path = json_path.replace('.json', '_val.json')
     train_json_path = json_path.replace('.json', '_train.json')
     create_test_json(json_path, test_json_path, train_json_path)
-
-classes = create_common_classes(json_paths)    
     
+classes = create_common_classes(json_paths)
+
 test_json_paths = [path.replace('.json', '_val.json') for path in json_paths]
 testset = CustomImageFolder(json_paths=test_json_paths, classes=classes, transform=transform_test)
 testloader = DataLoader(testset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
 
 train_json_paths = [path.replace('.json', '_train.json') for path in json_paths]
-# ----------------------------------------------------------------------------------
-repeat_target_files = [path for path in json_paths if 'toda' in path or 'itabashi' in path]
-datasets = []
-
-for json_path in train_json_paths:
-    # データ拡張を行いたいファイルの場合は repeat=5
-    if any(target in json_path for target in repeat_target_files):
-        repeat_value = 5
-    else:
-        repeat_value = 1  # 通常のデータは repeat=1
-        
-    # CustomImageFolder のインスタンスを作成
-    dataset = CustomImageFolder(json_paths=[json_path], classes=classes, transform=transform_train, repeat=repeat_value)
-    datasets.append(dataset)
-
-# すべてのデータセットを結合
-from torch.utils.data import ConcatDataset
-trainset = ConcatDataset(datasets)
-# ---------------------------------------------------------------------------------
-#trainset = CustomImageFolder(json_paths=train_json_paths, classes=classes, transform=transform_train)
+trainset = CustomImageFolder_new(json_paths=train_json_paths, classes=classes, transform=transform_train, augmentation=augmentation)
 trainloader = DataLoader(trainset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True) 
 #drop_lastをTrueに指定することで、データセットサイズがバッチサイズで割り切れない場合に最後のバッチが削除されます。
-
-'''
-#每个类别的样本数量相同的情况下testset/testloader: 
-num_samples_per_class = len(trainset) // len(trainset.classes)
-num_test_samples_per_class = int(num_samples_per_class * 0.2)
-
-test_indices = []
-for class_idx in range(len(trainset.classes)):
-    start_idx = class_idx * num_samples_per_class
-    end_idx = start_idx + num_test_samples_per_class
-    test_indices.extend(range(start_idx, end_idx))
-
-testset = Subset(trainset, test_indices)
-testloader = DataLoader(testset, batch_size=BATCH_SIZE, shuffle=True)
-'''
 
 # 2023-12-28: mtzk:
 # Initialization of Conv2D parameters according to He et al. (2015)
