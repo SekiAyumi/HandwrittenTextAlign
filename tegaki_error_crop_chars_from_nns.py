@@ -538,7 +538,7 @@ def detect_line_in_char(char_img): # cleaner
 def hough_lines_p(image, outLineImage, params):
     char_width = params['char_width']
     dpi = 600
-    char_size_px = int((char_width / 2.54) * dpi)
+    char_size_px = 94#int((char_width / 2.54) * dpi)
     
     lineList = []
     main_lines = None
@@ -563,7 +563,7 @@ def hough_lines_p(image, outLineImage, params):
 def draw_cross_points(image, lineList, params):
     sep_width = params['sep_width']
     dpi = 600
-    sep_size_px = int((sep_width / 2.54) * dpi)
+    sep_size_px = 47.3#int((sep_width / 2.54) * dpi)
     
     size = len(lineList)
     cross_points = []
@@ -721,452 +721,211 @@ def crop_squares(image, squares):
         cropped_images[i] = cropped_image
     return cropped_images
 
-def PerspectiveTransform(img, square, square_size):
-    left_down, right_down, right_up, left_up = square
-    # 台形の4点
-    perspective_base = np.float32([left_down, right_down, right_up, left_up])
+# -----------------------------------------------------------------------------------------
 
-    # 変換先の座標（正方形の4点）
-    perspective = np.float32([
-        [0, square_size], 
-        [square_size, square_size], 
-        [square_size, 0], 
-        [0, 0]
-    ])
-    psp_matrix = cv2.getPerspectiveTransform(perspective_base, perspective)
-    square_img = cv2.warpPerspective(img, psp_matrix, (square_size, square_size))
+# 傾きなし、縮小拡大なしとした場合の理論上の交点位置（外枠上のマス横線に対応する位置も含む）
+# INPUT: params ... 原稿用紙の設定
+# OUTPUT: numpy array (shape は 交点の総数 x 2)
+def make_model_points(params, image):
+    dpi = 600
+    sep_px = 47.3#params['sep_width'] / 2.54 * dpi
+    char_px = 94#params['char_width'] / 2.54 * dpi
+
+    # 横線位置（縦書き）または縦線位置（横書き）
+    ys = [char_px * j for j in range(params['nchars'] + 1)] 
     
-    return square_img
+    model_points = []
+    for i in range(params['ncols']):
+        x0 = (sep_px + char_px) * i # 行間の左（縦書き）または上（横書き）
+        x1 = x0 + sep_px  # マスの左（縦書き）または上（横書き）
+        x2 = x1 + char_px # マスの右（縦書き）または下（横書き）
+        model_points += [[x0, y] for y in ys]
+        model_points += [[x1, y] for y in ys]
+        model_points += [[x2, y] for y in ys]
+
+    # 外枠の右（縦書き）または下（横書き）の線
+    xlast = sep_px * (params['ncols'] + 1) + char_px * params['ncols'] 
+    model_points += [[xlast, y] for y in ys]
+    
+    #---------
+    # 検出した原稿用紙部分と中心位置を合わせる
+    #---------
+    
+    if params['muki'] == "tate":
+        model_width = xlast
+        model_height = params['nchars'] * char_px
+    else:
+        model_width = params['nchars'] * char_px
+        model_height = xlast
+    
+    bx = (image.shape[1] - model_width) * 0.5
+    by = (image.shape[0] - model_height) * 0.5
+    init_b = np.array([bx, by]) # 平行移動パラメータ
+    
+    model_points += init_b
+    #print(model_points, flush = True)
+
+    return np.array(model_points)
+
+# queries の点それぞれについて anchors の中で最も近い点を探す
+# INPUT:
+# - anchors : 点の列（numpy 配列。shape = (点の数, 2)）
+# - queries  : 点の列（numpy 配列。shape = (点の数, 2))
+# - eps : 最大二乗距離。これより離れた点しかないときは None を返す
+# OUTPUT:
+#   点のリスト。各要素は長さ2の numpy array で
+#      output[i] = queries[i] に最も近い anchors の点
+#   ただし最も近い点への二乗距離が eps を超えるときは
+#      output[i] = None
+
+#def find_nns(anchors, queries, eps=float("inf")):
+def find_nns(anchors, queries, params):
+    if type(anchors) == tuple and len(anchors) == 2:
+        anchors = anchors[0]
+        
+    unique_anchors = np.unique(anchors, axis=0)
+    
+    dpi = 600
+    sep_size_px = 47.3#params['sep_width'] / 2.54 * dpi
+    eps = (sep_size_px * 0.1) ** 2
+    
+    nns = []
+    for query in queries:
+        diff = anchors - query
+        sqnorm = (diff * diff).sum(axis=1)
+        nn_ix = sqnorm.argmin()
+        if sqnorm[nn_ix] <= eps:
+            nns.append(anchors[nn_ix].tolist())
+        else:
+            nns.append((np.nan, np.nan))
+        #nns.extend(list(pool))
+    return np.array(nns)
+
+def reshape(nns, params):
+    return nns.reshape(-1, 1, params['nchars']+1, 2)# 行: 2*params['ncols']+2
+
+def Interpolate_nns(nns):
+    nan_indices = np.argwhere(np.isnan(nns))
+    for row, _, col, coord in nan_indices:
+        if coord == 0:
+            r = 0
+            c = -1 if col != 0 else 1
+        elif coord == 1:
+            r = -1 if row != 0 else 1
+            c = 0
+        if not np.isnan(nns[row+r, _, col+c, coord]):
+            nns[row, _, col, coord] = nns[row+r, _, col+c, coord]
+        else:
+            found = False
+            if coord == 0:
+                indices = np.where(~np.isnan(nns[row, _, :, coord]))
+                try:
+                    col_indices = indices[2]
+                except IndexError:
+                    print(indices)
+                    return None
+                if len(col_indices) == 0:
+                    return None
+                closest_indice = col_indices[np.abs(col_indices-col).argmin()]
+                nns[row, _, col, coord] = nns[row, _, closest_indice, coord]
+                found = True
+            elif coord == 1:
+                indices = np.where(~np.isnan(nns[:, _, col, coord]))
+                try:
+                    row_indices = indices[0]
+                except IndexError:
+                    print(indices)
+                    return None
+                if len(row_indices) == 0:
+                    return None
+                closest_indice = row_indices[np.abs(row_indices-row).argmin()]
+                nns[row, _, col, coord] = nns[closest_indice, _, col, coord]
+                found = True
+            #while row+r < nns.shape[0]-1 and col+c < nns.shape[1]-1:
+            #    if coord == 0:
+            #        c += 1
+            #    elif coord == 1:
+            #        r += 1
+            #    if not np.isnan(nns[row+r, _, col+c, coord]):
+            #        nns[row, _, col, coord] = nns[row+r, _, col+c, coord]
+            #        found = True
+            #        break
+            #    elif not np.isnan(nns[row-r, _, col-c, coord]):
+            #        nns[row, _, col, coord] = nns[row-r, _, col-c, coord]
+            #        found = True
+            #        break
+            if not found:
+                return None  # 補完できなかった場合はNoneを返す
+    
+    print(nns, flush = True)
+    return nns
 
 # -----------------------------------------------------------------------------------------
 
-def sort_crosspoints(cross_points, params):
+def cropbox_nns(nns, params):
     muki = params['muki']
-    sep_width = params['sep_width']
     
-    dpi = 600
-    sep_size_px = int((sep_width / 2.54) * dpi)
-    
-    if type(cross_points) == tuple and len(cross_points) == 2:
-        cross_points = cross_points[0]
-    
-    if muki == 'tate':
-        numbered_cluster_dic = find_j_cluster_sort_i(cross_points, eps=sep_size_px*0.7, min_samples=1)
-    elif muki == 'yoko':
-        numbered_cluster_dic = find_i_cluster_sort_j(cross_points, eps=sep_size_px*0.7, min_samples=1)
-
-    return numbered_cluster_dic
-
-def compliment_cross_points(cross_points, params, numbered_cluster_dic):
-    muki = params['muki']
-    char_width = params['char_width']
-    sep_width = params['sep_width']
-    
-    dpi = 600
-    char_size_px = int((char_width / 2.54) * dpi)
-    sep_size_px = int((sep_width / 2.54) * dpi)
-    
-    if type(cross_points) == tuple and len(cross_points) == 2:
-        cross_points = cross_points[0]
-    
-    min_i, max_i = minmax_i_cluster(cross_points, eps=sep_size_px*0.7, min_samples=1)
-    min_j, max_j = minmax_j_cluster(cross_points, eps=sep_size_px*0.7, min_samples=1)
-    minmax = (min_i, max_i, min_j, max_j)
-    
-    for k in numbered_cluster_dic.keys():
-        # ノイズを除去
-        numbered_cluster_dic[k] = Rid_noise(numbered_cluster_dic[k], muki, char_size_px, sep_size_px)
-        print(numbered_cluster_dic[k])
-        # 欠けてる点を補間
-        numbered_cluster_dic[k] = Interpolate_lack(numbered_cluster_dic[k], muki, char_size_px, sep_size_px, minmax)
-    
-    return numbered_cluster_dic, minmax
-
-def find_i_cluster_sort_j(points, eps, min_samples=1):
-    if len(points) == 0:
-        return np.array(points)
-    
-    # 縦書き: ソート: x は降順、y は昇順
-    
-    # y座標のみを取り出してクラスタリングを実行
-    y_coords = np.array(points[:, 1]).reshape(-1, 1)
-    clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(y_coords)
-    labels = clustering.labels_
-    unique_labels = set(labels)
-    
-    # クラスターごとのx座標に基づいて昇順に番号を付ける
-    numbered_cluster_dic = dict()
-    for label in unique_labels:
-        cluster_points = points[labels == label]
-        # ノイズ除去 ⚠️　不完全だが、罫線以外の交点を取るため
-        if len(cluster_points) <= 5:
-            continue
-        
-        # x座標でソート
-        sorted_cluster_points = cluster_points[np.argsort(cluster_points[:, 0])]
-        numbered_cluster_dic[label] = sorted_cluster_points
-        
-    numbered_cluster_list = sorted(numbered_cluster_dic.items(), key=lambda item: np.mean(item[1][:, 1]))
-    numbered_cluster_dic.clear()
-    numbered_cluster_dic.update(numbered_cluster_list)
-    
-    return numbered_cluster_dic
-
-def find_j_cluster_sort_i(points, eps, min_samples=1):
-    if len(points) == 0:
-        return np.array(points)
-    
-    # 横書き: ソート: y は昇順、x は昇順
-    
-    # x座標のみを取り出してクラスタリングを実行
-    x_coords = np.array(points[:, 0]).reshape(-1, 1)
-    clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(x_coords)
-    labels = clustering.labels_
-    unique_labels = set(labels)
-    
-    # クラスターごとのy座標に基づいて昇順に番号を付ける
-    numbered_cluster_dic = dict()
-    for label in unique_labels:
-        cluster_points = points[labels == label]
-        # ノイズ除去 ⚠️　罫線以外の交点を取るため
-        if len(cluster_points) <= 5:
-            continue
-        
-        # y座標でソート
-        sorted_cluster_points = cluster_points[np.argsort(cluster_points[:, 1])]
-        numbered_cluster_dic[label] = sorted_cluster_points
-        
-    numbered_cluster_list = sorted(numbered_cluster_dic.items(), key=lambda item: np.mean(item[1][:, 0]), reverse=True)
-    numbered_cluster_dic.clear()
-    numbered_cluster_dic.update(numbered_cluster_list)
-    
-    return numbered_cluster_dic
-    
-
-def minmax_j_cluster(points, eps=1, min_samples=1): # x: 横書きの時
-    if len(points) == 0:
-        return np.array(points)
-    
-    # x座標(j)のみを取り出してクラスタリングを実行
-    x_coords = points[:, 0].reshape(-1, 1)
-    clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(x_coords)
-    labels = clustering.labels_
-    unique_labels = set(labels)
-    
-    mean_x_values = []
-    # 各クラスタのx座標の平均値を計算
-    for label in unique_labels:
-        if label == -1:
-            continue
-        cluster_indices = np.where(labels == label)[0]
-        mean_x = np.round(np.mean(points[cluster_indices, 0])).astype(int)
-        mean_x_values.append(mean_x)
-    
-    min_mean_x_values = min(mean_x_values)
-    max_mean_x_values = max(mean_x_values)
-
-    return min_mean_x_values, max_mean_x_values
-
-def minmax_i_cluster(points, eps=1, min_samples=1): # y: 縦書きの時
-    if len(points) == 0:
-        return np.array(points)
-    
-    # y座標(i)のみを取り出してクラスタリングを実行
-    y_coords = points[:, 1].reshape(-1, 1)
-    clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(y_coords)
-    labels = clustering.labels_
-    unique_labels = set(labels)
-    
-    mean_y_values = []
-    # 各クラスタのy座標の平均値を計算
-    for label in unique_labels:
-        if label == -1:
-            continue
-        cluster_indices = np.where(labels == label)[0]
-        mean_y = np.round(np.mean(points[cluster_indices, 1])).astype(int)
-        mean_y_values.append(mean_y)
-    
-    min_mean_y_values = min(mean_y_values)
-    max_mean_y_values = max(mean_y_values)
-
-    return min_mean_y_values, max_mean_y_values
-
-# クラスター内points
-def Rid_noise(points, muki, char_size_px, sep_size_px):
-    distances = []
-    clusters = set()
-    combinations = list(itertools.combinations(points, 3))
-    for combo in combinations:
-        if (is_distance(combo, 0, 1, char_size_px, sep_size_px) and is_distance(combo, 0, 2, char_size_px, sep_size_px)) or \
-        (is_distance(combo, 0, 1, char_size_px, sep_size_px) and is_distance(combo, 1, 2, char_size_px, sep_size_px)) or \
-        (is_distance(combo, 0, 2, char_size_px, sep_size_px) and is_distance(combo, 1, 2, char_size_px, sep_size_px)):
-            clusters.add(tuple(combo[0]))
-            clusters.add(tuple(combo[1]))
-            clusters.add(tuple(combo[2]))
-    if muki == 'tate':
-        return sorted(list(clusters), key=lambda point: point[1])
-    else:
-        return sorted(list(clusters), key=lambda point: point[0])
-    
-def Interpolate_lack(points, muki, char_size_px, sep_size_px, minmax):
-    if len(points) == 0:
-        return False
-    
-    if type(points) == np.ndarray:
-        points = list(points)
-    
-    # 等間隔に点を用意（理想）
-    min_i, max_i, min_j, max_j = minmax
-    if muki == 'tate':
-        gold_points = np.arange(min_i, max_i, char_size_px)
-    else:
-        gold_points = np.arange(min_j, max_j, char_size_px)
-    
-    # 欠けている点を見つける
-    i = 0
-    for j, gold_point in enumerate(gold_points):
-        
-        gold_point = (points[i][0], gold_point) if muki == 'tate' else (gold_point, points[i][1])
-        
-        is_exist = np.array([np.linalg.norm(np.array(point) - np.array(gold_point)) <= sep_size_px*0.5 for point in points])
-        
-        if ~is_exist.any():
-            points.append(gold_point) # 座標を補完
-            i -= 1
-            
-        i += 1
-        if i >= len(points):
-            i = len(points) - 1
-
-    if muki == 'tate':
-        return sorted(list(points), key=lambda point: point[1])
-    else:
-        return sorted(list(points), key=lambda point: point[0])
-# -----------------------------------------------------------------------------------------
-
-# cropboxの4点を収集
-def cropboxes_from_cross_points(numbered_cluster_dic, params, minmax):
-    keys = list(numbered_cluster_dic.keys())
     cropboxes = dict()
     number = 1
-    pre_cropbox = None
-    centerlines = centerline(params, minmax)
+    rows, _, cols, _ = nns.shape
     
-    for k in range(len(keys)-1):
-        if not numbered_cluster_dic[keys[k]]:
-            return False
-        for l in range(len(numbered_cluster_dic[keys[k]])-1):
-            
-            cropbox = search_4points(numbered_cluster_dic, keys, params, k, l)
-            
-            if cropbox and is_out_of_sync(cropbox, pre_cropbox, centerlines, params):
-                cropboxes[number] = cropbox
-                if number == 101:
-                    p1, p2, p3, p4 = cropbox
-                    #abs_ = abs(np.linalg.norm(np.array(p1)-np.array(p2)) - np.linalg.norm(np.array(p1)-np.array(p3)))
-                    #print(abs_, np.linalg.norm(np.array(p1)-np.array(p2)), np.linalg.norm(np.array(p1)-np.array(p3)))
-                    #print(cropbox)
-                number += 1
-                pre_cropbox = cropbox
-            else:
+    #-----------------
+    # 重複してる点を消す
+    #-----------------
+    row = 0
+    while row < len(nns):
+        if row > 0:
+            if (pre == nns[row, 0, 0, :]).all():
+                nns = np.delete(nns, row, axis=0)
                 continue
-    return cropboxes
+        pre = nns[row, 0, 0, :]
+        row += 1
         
-def search_4points(numbered_cluster_dic, keys, params, k, l):
-    muki = params['muki']
-    char_width = params['char_width']
-    sep_width = params['sep_width']
+    rows, _, cols, _ = nns.shape
     
-    dpi = 600
-    char_size_px = int((char_width / 2.54) * dpi)
-    sep_size_px = int((sep_width / 2.54) * dpi)
-        
-    
-    #if not numbered_cluster_dic[keys[k]]:
-    #    return False
-    
-    p1 = numbered_cluster_dic[keys[k]][l]
-    #print(f'p1: {p1}')
-    
-    i = 0
-    p2 = None
-    while i < 3 and k+i < len(keys):
-        
-        if not numbered_cluster_dic[keys[k+i]]:
-            return False
-        
-        indice2, cood2 = search_another_point(p1, numbered_cluster_dic[keys[k+i]][l+1:], char_size_px, sep_size_px)
-        #indice2 += l+1
-        if indice2 != -1:
-            #print(f'indice2, cood2: {indice2}, {cood2}')
-            p2 = cood2
-            break
-        i += 1
-    else:
-        if p2 is None:
-            return False
-    
-    i = 1
-    p3 = None
-    while i < 5 and k+i < len(keys):
-        
-        if not numbered_cluster_dic[keys[k+i]]:
-            return False
-        
-        indice3, cood3 = search_another_point(p1, numbered_cluster_dic[keys[k+i]][:], char_size_px, sep_size_px)
-        if indice3 != -1:
-            #print(f'indice3, cood3: {indice3}, {cood3}')
-            indice, _ = search_another_point(p2, [cood3], char_size_px*np.sqrt(2), sep_size_px)
-            if indice != -1:
-                p3 = cood3
-                break
-        i += 1
-    else:
-        if p3 is None:
-            return False
-    
-    j = 0
-    p4 = None
-    while j < 3 and k+i+j < len(keys):
-        
-        if not numbered_cluster_dic[keys[k+i+j]]:
-            return False
-        
-        if indice3+1 < len(numbered_cluster_dic[keys[k+i+j]]):
-        
-            indice4, cood4 = search_another_point(p2, numbered_cluster_dic[keys[k+i+j]][indice3+1:], char_size_px, sep_size_px)
-            #indice4 += indice3+1
-            if indice4 != -1:
-                #print(f'indice4, cood4: {indice4}, {cood4}')
-                indice, _ = search_another_point(p3, [cood4], char_size_px, sep_size_px)
-                if indice != -1:
-                    p4 = cood4
-                    return [p1, p2, p3, p4]
-        j += 1
-    else:
-        if p4 is None:
-            return False
-#------------------------------------------------------------------------------------------------
-
-# 候補の中で一番誤差小さいもの
-def search_another_point(p1, p2s, char_size_px, sep_size_px):
-    points = [(p, p2s[p], delta(p1, p2s[p], char_size_px)) for p in range(len(p2s)) \
-              if delta(p1, p2s[p], char_size_px) <= sep_size_px*0.5]
-    if len(points) > 0:
-        points = sorted(points, key=lambda point: point[2])
-        return points[0][0], points[0][1] # 0: indice, 1: coord
-    else:
-        return -1, (-1, -1)
-    
-def delta(p1, p2, char_size_px):
-    return abs(np.linalg.norm(np.array(p1)-np.array(p2)) - char_size_px)
-
-#------------------------------------------------------------------------------------------------
-
-def centerline(params, minmax):
-    muki = params['muki']
-    nchars = params['nchars']
-    ncols = params['ncols']
-    char_width = params['char_width']
-    sep_width = params['sep_width']
-    
-    # ピクセルに変換する
-    dpi = 600
-    char_size_px = int((char_width / 2.54) * dpi)
-    sep_size_px = int((sep_width / 2.54) * dpi)
-    
-    min_i, max_i, min_j, max_j = minmax
     if muki == 'tate':
-        top = max_j
-        bottom = min_j
-        main_centerline = np.arange(max_j - sep_size_px - 0.5*char_size_px, min_j, - (char_size_px + sep_size_px))
-        sub_centerline = np.arange(min_i + 0.5*char_size_px, max_i, char_size_px)
+        for row in range(rows-2, 0, -2):
+            for col in range(cols-1):
+                p1 = nns[row, 0, col, :]
+                p2 = nns[row, 0, col+1, :]
+                p3 = nns[row-1, 0, col, :]
+                p4 = nns[row-1, 0, col+1, :]
+                if len([p1, p2, p3, p4]) == len(set([
+                    tuple(np.round(p1)), 
+                    tuple(np.round(p2)), 
+                    tuple(np.round(p3)), 
+                    tuple(np.round(p4))
+                ])):
+
+                    cropboxes[number] = [p1, p2, p3, p4]
+                    number += 1
     else:
-        top = min_i
-        bottom = max_i
-        main_centerline = np.arange(min_i + sep_size_px + 0.5*char_size_px, max_i, char_size_px + sep_size_px)
-        sub_centerline = np.arange(min_j + 0.5*char_size_px, max_j, char_size_px)
-    return (main_centerline, sub_centerline) 
+        for row in range(1, rows-1, 2):
+            for col in range(cols-1):
+                p1 = nns[row, 0, col, :]
+                p2 = nns[row, 0, col+1, :]
+                p3 = nns[row+1, 0, col, :]
+                p4 = nns[row+1, 0, col+1, :]
+                if len([p1, p2, p3, p4]) == len(set([tuple(p1), tuple(p2), tuple(p3), tuple(p4)])):
+                    cropboxes[number] = [p1, p2, p3, p4]
+                    number += 1
+    return cropboxes
 
-def is_out_of_sync(cropbox, pre_cropbox, centerlines, params):
-    return is_slip(cropbox, centerlines, params) and is_square(cropbox, params) and is_overlap(cropbox, pre_cropbox)
+def crop_squares(image, squares):
+    cropped_images = dict()
+    image_np = np.array(image)
+    for i, square in squares.items():
+        if square is None:
+            continue
+        x_coords = sorted([int(p[0]) for p in square])
+        y_coords = sorted([int(p[1]) for p in square])
+        
+        min_x, max_x = x_coords[1], x_coords[-2]
+        min_y, max_y = y_coords[1], y_coords[-2]
+        
+        cropped_image = image_np[min_y:max_y, min_x:max_x]
+            
+        cropped_images[i] = cropped_image
+    return cropped_images
 
-def is_slip(cropbox, centerlines, params):
-    p1, p2, p3, p4 = cropbox
-    main_centerline, sub_centerline = centerlines
-    
-    muki = params['muki']
-    m = 0 if muki == 'tate' else 1
-    boxcenter = [((p1[z]+p2[z])/2 + (p3[z]+p4[z])/2)/2 for z in [0, 1]]
-    
-    sep_width = params['sep_width']
-    dpi = 600
-    sep_size_px = int((sep_width / 2.54) * dpi)
-    eps = sep_size_px*0.7
-    
-    is_center_main = np.array([abs(boxcenter[m] - center) < eps for center in main_centerline])
-    is_center_sub = np.array([abs(boxcenter[abs(m-1)] - center) < eps for center in sub_centerline])
-    
-    return is_center_main.any() and is_center_sub.any()
-
-def is_square(cropbox, params):
-    p1, p2, p3, p4 = cropbox
-    
-    char_width = params['char_width']
-    sep_width = params['sep_width']
-    dpi = 600
-    char_size_px = int((char_width / 2.54) * dpi)
-    sep_size_px = int((sep_width / 2.54) * dpi)
-    
-    eps = sep_size_px*0.1
-    
-    dist_12 = np.linalg.norm(np.array(p1)-np.array(p2))
-    dist_34 = np.linalg.norm(np.array(p3)-np.array(p4))
-    dist_13 = np.linalg.norm(np.array(p1)-np.array(p3))
-    dist_24 = np.linalg.norm(np.array(p2)-np.array(p4))
-    
-    if abs(dist_12-char_size_px) < eps and abs(dist_13-char_size_px) < eps:
-        return True
-    elif abs(dist_12-char_size_px) < eps and abs(dist_24-char_size_px) < eps:
-        return True
-    elif abs(dist_13-char_size_px) < eps and abs(dist_34-char_size_px) < eps:
-        return True
-    elif abs(dist_24-char_size_px) < eps and abs(dist_34-char_size_px) < eps:
-        return True
-    else:
-        return False
-    
-    #return abs_<eps
-
-def is_overlap(cropbox, pre_cropbox):
-    if pre_cropbox == None:
-        return True
-
-    # 四角形の座標を定義
-    rect1_coords = cropbox
-    rect2_coords = pre_cropbox
-    rect1_coords[2], rect1_coords[3] = rect1_coords[3], rect1_coords[2]
-    rect2_coords[2], rect2_coords[3] = rect2_coords[3], rect2_coords[2]
-
-    # ShapelyのPolygonオブジェクトを作成
-    rect1 = create_valid_polygon(rect1_coords)
-    rect2 = create_valid_polygon(rect2_coords)
-
-    # 重なり部分のポリゴンを計算
-    intersection = rect1.intersection(rect2)
-
-    # 重なり面積を取得
-    overlap_area = intersection.area
-    
-    return overlap_area < rect1.area*0.1
-                              
-def create_valid_polygon(coords):
-    polygon = Polygon(coords)
-    if not polygon.is_valid:
-        #print(f"Invalid polygon: {explain_validity(polygon)}")
-        # buffer(0)を使用して自己交差を修正
-        polygon = polygon.buffer(0)
-        if not polygon.is_valid:
-            raise ValueError("Polygon cannot be fixed automatically.")
-    return polygon
 
